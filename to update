@@ -1,0 +1,215 @@
+/****** Object:  StoredProcedure [meta].[spIncrementalTableLoad]    Script Date: 9/20/2022 12:42:47 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROC [meta].[spIncrementalTableLoad] @tableName [nvarchar](100),@TableType [nvarchar](100),@schemaName [nvarchar](100),@cdcSchemaName [nvarchar](100),@ETLLoadMaster [nvarchar](100),@TableKeyColumn [nvarchar](100),@Site [nvarchar](5) AS
+BEGIN
+DECLARE @sql_fragment1 nvarchar(4000),
+              @sql_fragment2 nvarchar(4000),
+              @sql_fragment3 nvarchar(4000),
+              @sql_fragment4 nvarchar(4000),
+              @sql_fragment5 nvarchar(4000),
+              @sql_fragment6 nvarchar(4000),
+              @sql_fragment7 nvarchar(4000),
+              @intColumnCount  INT, 
+        @intProcessCount INT, 
+        @varColList      VARCHAR(4000) ,
+              @varlist  VARCHAR(4000),
+              @KeyColumns nvarchar (2000),
+              @FinalKeyColumn nvarchar(2000),
+              @loaddate  date,
+              @loadtime time,
+              @LoadDateFinal nvarchar(10),
+              @LoadtimeFinal nvarchar(8),
+              @RecordCount BIGINT,
+              @STARTDATE DATETIME,
+              @ENDDATE DATETIME,
+              @ErrorMessage nvarchar(2000),
+              @ErrorSeverity int,
+              @ErrorNumber int,
+              @ErrorState INT,
+              @ErrorProcedure nvarchar(100),
+              @ErrorLineNumber INT,
+              @blank nvarchar(10);
+
+
+              SELECT @STARTDATE=GETDATE();
+              Select @blank = ' '''' '
+              SET @varColList = '' 
+
+IF Object_id('tempdb.dbo.#tempColumnNames') IS NOT NULL 
+  BEGIN 
+      DROP TABLE #tempcolumnnames; 
+  END 
+
+CREATE TABLE #tempcolumnnames 
+  ( 
+     intid          INT, 
+        vartablenames VARCHAR(256) ,
+     varcolumnnames VARCHAR(256) 
+  ) 
+
+INSERT INTO #tempcolumnnames 
+select Row_number() 
+         OVER ( 
+           ORDER BY table_name,column_name), 
+    c.table_name,c.column_name from INFORMATION_SCHEMA.COLUMNS c
+       inner join sys.schemas s
+       on s.name = c.table_schema
+       inner join sys.tables t
+       on t.schema_id = s.schema_id
+       and c.table_name=t.name
+       inner join sys.columns sc
+       on sc.object_id = t.object_id
+       and c.column_name = sc.name 
+       where table_name = @tableName and table_schema=@schemaName and sc.is_identity  = 0;
+
+SET @intProcessCount = 1 
+SET @intColumnCount = (SELECT Count(*) 
+                       FROM   #tempcolumnnames) 
+
+WHILE ( @intProcessCount <= @intColumnCount ) 
+  BEGIN 
+      SET @varColList = @varColList + ', ' 
+                        + (SELECT varcolumnnames 
+                           FROM   #tempcolumnnames 
+                           WHERE  intid = @intProcessCount) 
+      SET @intProcessCount +=1 
+
+
+          END 
+          SET  @varlist =  Stuff(@varColList, 1, 2, '') ;
+          print @varlist
+
+       BEGIN TRAN
+       BEGIN TRY
+
+       IF (@TableType IN ('TRANSACTION'))
+              BEGIN
+
+                             set @ErrorLineNumber=0
+
+
+              set @sql_fragment1=N'SELECT @KeyColumn=KEYCOLUMN FROM Meta.'+@TableKeyColumn+' WHERE UPPER(TableName)=UPPER('''+@tableName+''')';
+
+              print @sql_fragment1
+              EXECUTE sp_executesql @sql_fragment1
+                             ,N'@KeyColumn nvarchar(300) OUTPUT'
+                             ,@KeyColumns OUTPUT
+                             --SELECT @KeyColumns;
+                             PRINT @KeyColumns
+              set @FinalKeyColumn  = @KeyColumns
+              print @FinalKeyColumn
+
+                             set @ErrorLineNumber=1
+
+
+              IF @FinalKeyColumn IS NULL
+                      THROW 50001,'NO RECORDS FOUND IN TABLEKEYCOLUMN FOR PROVIDED TABLE',1; 
+
+
+                                    set @ErrorLineNumber=2
+
+              set @sql_fragment2= N'DELETE from '+@schemaName+'.'+@tableName+' where Site = '+@Site+' and concat('+@FinalKeyColumn+','+@blank+') in 
+              (SELECT concat('+@FinalKeyColumn+','+@blank+')  FROM '+@cdcSchemaName+'.'+@tableName+')';
+
+              print @sql_fragment2
+              EXECUTE(@sql_fragment2);
+
+
+                            set @ErrorLineNumber=3
+
+
+          SET @sql_fragment3=  N'INSERT INTO '+@schemaName+'.'+@tableName+'('+@varlist+') SELECT '+@varlist+' FROM '+@cdcSchemaName+'.'+@tableName+' where Site = '+@Site+' and __$operation in (1,2,4)';
+          print @sql_fragment3
+          EXECUTE (@sql_fragment3);
+
+
+
+                     set @ErrorLineNumber=4
+
+              set @sql_fragment4 =N'SELECT @LoadateOutput = MAX(cast(LAST_UPDATED_DATE as date)) FROM '+@cdcSchemaName+'.'+@tableName;
+              print (@sql_fragment4)
+
+
+              EXECUTE sp_executesql @sql_fragment4
+                             ,N'@LoadateOutput date OUTPUT'
+                             ,@loaddate OUTPUT
+                             --SELECT @loaddate;
+                             PRINT @loaddate
+       set @LoadDateFinal=@loaddate
+       --print @LoadDateFinal
+              
+              set @ErrorLineNumber=5
+
+
+              set @sql_fragment5=N'SELECT @LoadtimeOutput= cast(MAX(LAST_UPDATED_DATE) as time) FROM '+@cdcSchemaName+'.'+@tableName+' where cast(LAST_UPDATED_DATE as date) = '''+@LoadDateFinal+'''';
+                      --PRINT @sql_fragment5
+
+
+       EXECUTE sp_executesql @sql_fragment5
+                             ,N'@LoadtimeOutput TIME OUTPUT'
+                             ,@loadtime OUTPUT
+                             --select @loadtime;
+                             print @loadtime
+                             set @LoadtimeFinal=@loadtime
+                                    --print @LoadtimeFinal
+
+
+              set @ErrorLineNumber=6
+
+       set @sql_fragment7 = N'UPDATE Meta.'+@ETLLoadMaster+' SET LastLoadDate = '''+@LoadDateFinal+''',LastLoadTimestamp='''+@LoadtimeFinal+''' WHERE TableName = '''+@tableName+''''
+                      PRINT @sql_fragment7
+
+         EXECUTE(@sql_fragment7);
+
+          END
+
+
+          set @ErrorLineNumber=7
+
+
+              SET @sql_fragment6 = N'SELECT @Record_Count=COUNT_BIG(*) FROM '+@schemaName+'.'+@tableName
+
+              EXECUTE sp_executesql @sql_fragment6
+                             ,N'@Record_Count BIGINT OUTPUT'
+                             ,@RecordCount OUTPUT
+                             
+                             print @RecordCount
+
+              set @ErrorLineNumber=8
+
+
+                      SELECT @ENDDATE=GETDATE();
+                      
+      END TRY
+
+
+       BEGIN CATCH
+              
+              IF @@TRANCOUNT > 0  
+                      ROLLBACK TRAN
+                      PRINT 'ROLLBACK';
+         -- Return the error information. 
+
+              SELECT @ErrorMessage = ERROR_MESSAGE(),@ErrorSeverity = ERROR_SEVERITY()
+                ,@ErrorNumber= ERROR_NUMBER(), @ErrorState=ERROR_STATE()
+        ,@ErrorProcedure=ERROR_PROCEDURE(); 
+              --RAISERROR(@ErrorMessage, @ErrorSeverity, 1);   
+
+       END CATCH;  
+
+              IF @@TRANCOUNT >0
+BEGIN
+    PRINT 'COMMIT';
+    COMMIT TRAN;
+END
+       
+       IF @ErrorMessage IS NULL
+       INSERT INTO Meta.QDBLogs VALUES ('spIncrementalTableLoad',@tableName,@STARTDATE,@ENDDATE,@ErrorMessage,@ErrorSeverity,@ErrorNumber,@ErrorState,'SUCCESS',@RecordCount,NULL)
+       ELSE
+       INSERT INTO Meta.QDBLogs VALUES ('spIncrementalTableLoad',@tableName,@STARTDATE,@ENDDATE,@ErrorMessage,@ErrorSeverity,@ErrorNumber,@ErrorState,'FAILURE',@RecordCount,@ErrorLineNumber)
+END
+
+--[meta].[spIncrementalTableLoad] 'Rawdatas','TRANSACTION','raw','cdc','ETLLoadMaster','TableKeyColumn' , '1'
