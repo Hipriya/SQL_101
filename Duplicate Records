@@ -1,0 +1,6 @@
+Delete from
+(
+Select count(*), id from table1
+group by id
+having count(id)>2
+) aa
