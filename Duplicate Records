@@ -1,3 +1,4 @@
+#delete the duplicate records from the table.
 Delete from
 (
 Select count(*), id from table1
